@@ -89,6 +89,8 @@ The help should already contain some useful information:
       --ssl                 enable ssl connection to Cassandra cluster.  Must also
                             set --certfile.
       --certfile CERTFILE   ca cert file for SSL.  Assumes --ssl.
+      --new-keyspace-name   set new name of keyspace - option for export keyspace to another cluster
+      --new-cluster-name    new name of cluster - option for export keyspace to another cluster
 
 In its simplest invocation, it exports data and schemas for all
 keyspaces:

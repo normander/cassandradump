@@ -3,6 +3,8 @@ import sys
 import itertools
 import codecs
 from ssl import PROTOCOL_TLSv1
+import six
+import re
 
 try:
     import cassandra
@@ -48,17 +50,56 @@ def table_to_cqlfile(session, keyspace, tablename, flt, tableval, filep, limit=0
 
     cnt = 0
 
+    def cql_encode_object(val):
+        """
+        Default encoder for all objects that do not have a specific encoder function
+        registered. This function simply calls :meth:`str()` on the object.
+        """
+        if isinstance(val, object):
+            #if our object is a UDT, give cassandra what it wants (using JSON to process), and regex to clean
+            if type(val).__module__.startswith("cassandra"):
+                return '{%s}' % ', '.join('%s: %s' % (
+                    k,
+                    session.encoder.mapping.get(type(v), cql_encode_object)(v)
+                ) for k, v in six.iteritems(val.__dict__))
+        return str(val)
+
+    def cql_encode_map_collection(val):
+        """
+        Converts a dict into a string of the form ``{key1: val1, key2: val2, ...}``.
+        This is suitable for ``map`` type columns.
+        """
+        return '{%s}' % ', '.join('%s: %s' % (
+            session.encoder.mapping.get(type(k), cql_encode_object)(k),
+            session.encoder.mapping.get(type(v), cql_encode_object)(v)
+        ) for k, v in six.iteritems(val))
+
+    def cql_encode_set_collection(val):
+        """
+        Converts a sequence to a string of the form ``{item1, item2, ...}``.  This
+        is suitable for ``set`` type columns.
+        """
+        return '{%s}' % ', '.join(session.encoder.mapping.get(type(v), cql_encode_object)(v) for v in val)
+
+    def cql_encode_list_collection(val):
+        """
+        Converts a sequence to a string of the form ``[item1, item2, ...]``.  This
+        is suitable for ``list`` type columns.
+        """
+        return '[%s]' % ', '.join(session.encoder.mapping.get(type(v), cql_encode_object)(v) for v in val)
+
+
     def make_non_null_value_encoder(typename):
         if typename == 'blob':
             return session.encoder.cql_encode_bytes
         elif typename.startswith('map'):
-            return session.encoder.cql_encode_map_collection
+            return cql_encode_map_collection
         elif typename.startswith('set'):
-            return session.encoder.cql_encode_set_collection
+            return cql_encode_set_collection
         elif typename.startswith('list'):
-            return session.encoder.cql_encode_list_collection
+            return cql_encode_list_collection
         else:
-            return session.encoder.cql_encode_all_types
+            return  session.encoder.cql_encode_all_types
 
     def make_value_encoder(typename):
         e = make_non_null_value_encoder(typename)
@@ -307,9 +348,16 @@ def setup_cluster():
     else:
         port = int(args.port)
 
+    if args.connect_timeout is None:
+        connect_timeout = 5
+    else:
+        connect_timeout = int(args.connect_timeout)
+
     if args.ssl is not None and args.certfile is not None:
       ssl_opts = { 'ca_certs': args.certfile,
-                   'ssl_version': PROTOCOL_TLSv1 }
+                   'ssl_version': PROTOCOL_TLSv1,
+                   'keyfile': args.userkey,
+                   'certfile': args.usercert }
     else:
       ssl_opts = {}
 
@@ -324,9 +372,9 @@ def setup_cluster():
             elif args.protocol_version > 1:
                 auth = PlainTextAuthProvider(username=args.username, password=args.password)
 
-        cluster = Cluster(contact_points=nodes, port=port, protocol_version=args.protocol_version, auth_provider=auth, load_balancing_policy=cassandra.policies.WhiteListRoundRobinPolicy(nodes), ssl_options=ssl_opts)
+        cluster = Cluster(control_connection_timeout=connect_timeout, connect_timeout=connect_timeout, contact_points=nodes, port=port, protocol_version=args.protocol_version, auth_provider=auth, load_balancing_policy=cassandra.policies.WhiteListRoundRobinPolicy(nodes), ssl_options=ssl_opts)
     else:
-        cluster = Cluster(contact_points=nodes, port=port, load_balancing_policy=cassandra.policies.WhiteListRoundRobinPolicy(nodes), ssl_options=ssl_opts)
+        cluster = Cluster(control_connection_timeout=connect_timeout, connect_timeout=connect_timeout, contact_points=nodes, port=port, load_balancing_policy=cassandra.policies.WhiteListRoundRobinPolicy(nodes), ssl_options=ssl_opts)
 
     session = cluster.connect()
 
@@ -340,11 +388,31 @@ def cleanup_cluster(session):
     session.cluster.shutdown()
     session.shutdown()
 
+def rename_keyspace():
+    old_keyspace = str(args.keyspace[0])
+    new_keyspace = args.new_keyspace_name
+
+    with open(str(args.export_file), 'r') as f:
+        newlines = []
+        for line in f.readlines():
+            cluster_name = re.search(r'{\'class\': \'NetworkTopologyStrategy\', \'([^\']*)\'', line)
+            if cluster_name is not None and args.new_cluster_name is not None:
+                newlines.append(
+                    line.replace(str(cluster_name.group(1)), str(args.new_cluster_name)).replace(str(old_keyspace),
+                                                                                                 str(new_keyspace)))
+            else:
+                newlines.append(line.replace(str(old_keyspace), str(new_keyspace)))
+    with open(str(args.export_file), 'w') as f:
+        for line in newlines:
+            f.write(line)
+
+    print "Name of keyspace was changed, ", old_keyspace, "->", new_keyspace
 
 def main():
     global args
 
     parser = argparse.ArgumentParser(description='A data exporting tool for Cassandra inspired from mysqldump, with some added slice and dice capabilities.')
+    parser.add_argument('--connect-timeout', help='set timeout for connecting to the cluster (in seconds)', type=int)
     parser.add_argument('--cf', help='export a column family. The name must include the keyspace, e.g. "system.schema_columns". Can be specified multiple times', action='append')
     parser.add_argument('--export-file', help='export data to the specified file')
     parser.add_argument('--filter', help='export a slice of a column family according to a CQL filter. This takes essentially a typical SELECT query stripped of the initial "SELECT ... FROM" part (e.g. "system.schema_columns where keyspace_name =\'OpsCenter\'", and exports only that data. Can be specified multiple times', action='append')
@@ -363,11 +431,19 @@ def main():
     parser.add_argument('--limit', help='set number of rows return limit')
     parser.add_argument('--ssl', help='enable ssl connection to Cassandra cluster.  Must also set --certfile.', action='store_true')
     parser.add_argument('--certfile', help='ca cert file for SSL.  Assumes --ssl.')
+    parser.add_argument('--userkey', help='user key file for client authentication.  Assumes --ssl.')
+    parser.add_argument('--usercert', help='user cert file for client authentication.  Assumes --ssl.')
+    parser.add_argument('--new-keyspace-name', help='set new name of keyspace - option for export keyspace to another cluster')
+    parser.add_argument('--new-cluster-name', help='new name of cluster - option for export keyspace to another cluster')
 
     args = parser.parse_args()
 
     if args.import_file is None and args.export_file is None:
         sys.stderr.write('--import-file or --export-file must be specified\n')
+        sys.exit(1)
+
+    if (args.userkey is not None or args.usercert is not None) and (args.userkey is None or args.usercert is None):
+        sys.stderr.write('--userkey and --usercert must both be provided\n')
         sys.exit(1)
 
     if args.import_file is not None and args.export_file is not None:
@@ -384,6 +460,13 @@ def main():
         import_data(session)
     elif args.export_file:
         export_data(session)
+
+    if args.new_keyspace_name is not None and args.export_file is not None:
+        if len(args.keyspace) < 2:
+            rename_keyspace()
+        else:
+            sys.stderr.write('New name for keyspace is only available when you exporting single keyspace!')
+            sys.exit(1)
 
     cleanup_cluster(session)
 
