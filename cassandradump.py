@@ -5,6 +5,7 @@ import codecs
 from ssl import PROTOCOL_TLSv1
 import six
 import re
+import time
 
 try:
     import cassandra
@@ -21,7 +22,7 @@ DOT_EVERY = 1000
 CONCURRENT_BATCH_SIZE = 1000
 
 args = None
-
+x = 0
 def cql_type(val):
     try:
         return val.data_type.typename
@@ -58,10 +59,10 @@ def table_to_cqlfile(session, keyspace, tablename, flt, tableval, filep, limit=0
         if isinstance(val, object):
             #if our object is a UDT, give cassandra what it wants (using JSON to process), and regex to clean
             if type(val).__module__.startswith("cassandra"):
-                return '{%s}' % ', '.join('%s: %s' % (
-                    k,
-                    session.encoder.mapping.get(type(v), cql_encode_object)(v)
-                ) for k, v in six.iteritems(val.__dict__))
+               return '{%s}' % ', '.join('%s: %s' % (
+                     k,
+                     session.encoder.mapping.get(type(v), cql_encode_object)(v)
+               ) for k, v in six.iteritems(val.__dict__))
         return str(val)
 
     def cql_encode_map_collection(val):
@@ -88,6 +89,12 @@ def table_to_cqlfile(session, keyspace, tablename, flt, tableval, filep, limit=0
         """
         return '[%s]' % ', '.join(session.encoder.mapping.get(type(v), cql_encode_object)(v) for v in val)
 
+    def cql_encode_all_types(val):
+        """
+        Converts any type into a CQL string, defaulting to ``cql_encode_object``
+        if :attr:`~Encoder.mapping` does not contain an entry for the type.
+        """
+        return session.encoder.mapping.get(type(val), cql_encode_object)(val)
 
     def make_non_null_value_encoder(typename):
         if typename == 'blob':
@@ -99,7 +106,7 @@ def table_to_cqlfile(session, keyspace, tablename, flt, tableval, filep, limit=0
         elif typename.startswith('list'):
             return cql_encode_list_collection
         else:
-            return  session.encoder.cql_encode_all_types
+            return  cql_encode_all_types
 
     def make_value_encoder(typename):
         e = make_non_null_value_encoder(typename)
@@ -175,8 +182,13 @@ def import_data(session):
 
     statement = ''
     concurrent_statements = []
-
+    operationCount  = len(open(args.import_file, 'rU').readlines( ))
+    i = 0
     for line in fp:
+        percentStatus = 100 * (float(i)/float(operationCount))
+        sys.stdout.write("\rProgress: %d%%" % percentStatus)
+        i = i + 1
+        sys.stdout.flush()
         statement += line
         if statement.endswith(";\n"):
             if can_execute_concurrently(statement):
@@ -433,7 +445,7 @@ def main():
     parser.add_argument('--certfile', help='ca cert file for SSL.  Assumes --ssl.')
     parser.add_argument('--userkey', help='user key file for client authentication.  Assumes --ssl.')
     parser.add_argument('--usercert', help='user cert file for client authentication.  Assumes --ssl.')
-    parser.add_argument('--new-keyspace-name', help='set new name of keyspace - option for export keyspace to another cluster')
+    parser.add_argument('--new-keyspace-name', help='new name of keyspace')
     parser.add_argument('--new-cluster-name', help='new name of cluster - option for export keyspace to another cluster')
 
     args = parser.parse_args()
