@@ -408,9 +408,9 @@ def rename_keyspace():
         newlines = []
         for line in f.readlines():
             cluster_name = re.search(r'{\'class\': \'NetworkTopologyStrategy\', \'([^\']*)\'', line)
-            if cluster_name is not None and args.new_cluster_name is not None:
+            if cluster_name is not None and args.new_datacenter_name is not None:
                 newlines.append(
-                    line.replace(str(cluster_name.group(1)), str(args.new_cluster_name)).replace(str(old_keyspace),
+                    line.replace(str(cluster_name.group(1)), str(args.new_datacenter_name)).replace(str(old_keyspace),
                                                                                                  str(new_keyspace)))
             else:
                 newlines.append(line.replace(str(old_keyspace), str(new_keyspace)))
@@ -446,7 +446,7 @@ def main():
     parser.add_argument('--userkey', help='user key file for client authentication.  Assumes --ssl.')
     parser.add_argument('--usercert', help='user cert file for client authentication.  Assumes --ssl.')
     parser.add_argument('--new-keyspace-name', help='new name of keyspace')
-    parser.add_argument('--new-cluster-name', help='new name of cluster - option for export keyspace to another cluster')
+    parser.add_argument('--new-datacenter-name', help='new name of datacenter - option for export keyspace to another cluster')
 
     args = parser.parse_args()
 
